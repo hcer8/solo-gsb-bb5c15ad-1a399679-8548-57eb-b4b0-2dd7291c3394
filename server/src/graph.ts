@@ -142,6 +142,105 @@ export function topoLevels(ids: string[], edges: EdgeLike[]): Record<string, num
 }
 
 /**
+ * 确定性拓扑排序（Kahn）：就绪集中的并列节点统一按创建时间、再按 id 稳定排序，
+ * 因此同一图（含相同的虚拟边）任何时候都产出同一个拓扑序。
+ * extraEdges 为临时注入的虚拟约束（不落库）；若图（含虚拟边）有环则返回 null。
+ */
+export interface OrderNode {
+  id: string;
+  createdAt: string;
+}
+
+export function topoOrder(nodes: OrderNode[], edges: EdgeLike[], extraEdges: EdgeLike[] = []): string[] | null {
+  const sorted = [...nodes].sort(
+    (x, y) => x.createdAt.localeCompare(y.createdAt) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0),
+  );
+  const rank = new Map<string, number>(sorted.map((n, i): [string, number] => [n.id, i]));
+  const indeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const n of nodes) {
+    indeg.set(n.id, 0);
+    adj.set(n.id, []);
+  }
+  for (const e of [...edges, ...extraEdges]) {
+    if (!indeg.has(e.fromId) || !indeg.has(e.toId)) continue;
+    indeg.set(e.toId, indeg.get(e.toId)! + 1);
+    adj.get(e.fromId)!.push(e.toId);
+  }
+  // 就绪集：始终按 rank 升序的有序数组（数据规模小，有序插入即可）
+  const ready = sorted.filter((n) => indeg.get(n.id) === 0).map((n) => n.id);
+  const order: string[] = [];
+  while (ready.length > 0) {
+    const cur = ready.shift()!;
+    order.push(cur);
+    for (const nxt of adj.get(cur)!) {
+      indeg.set(nxt, indeg.get(nxt)! - 1);
+      if (indeg.get(nxt) === 0) {
+        const r = rank.get(nxt)!;
+        let i = 0;
+        while (i < ready.length && rank.get(ready[i])! < r) i++;
+        ready.splice(i, 0, nxt);
+      }
+    }
+  }
+  return order.length === nodes.length ? order : null;
+}
+
+/** 顺序确定性查询的判定结果 */
+export type OrderVerdict = 'a-before-b' | 'b-before-a' | 'unconstrained';
+
+/** 一条见证：在虚拟约束下的合法拓扑序及其分层（供画布临时预览） */
+export interface OrderWitness {
+  /** 合法拓扑序（并列节点按创建时间、再按 id 稳定排序） */
+  order: string[];
+  /** 注入虚拟约束边后的拓扑层级 */
+  levels: Record<string, number>;
+  levelCount: number;
+}
+
+export type OrderQueryOutcome =
+  | {
+      verdict: 'a-before-b' | 'b-before-a';
+      /** 从前者到后者的一条最短约束路径（节点 id 序列，含起终点；BFS 保证边数最少） */
+      path: string[];
+    }
+  | {
+      verdict: 'unconstrained';
+      /** 双向见证：aFirst 为「A 在 B 前」的合法拓扑序，bFirst 为「B 在 A 前」的合法拓扑序 */
+      witnesses: { aFirst: OrderWitness; bFirst: OrderWitness };
+    };
+
+/** 在图中注入「beforeId 必须早于 afterId」的虚拟约束，生成一个见证拓扑序及其分层 */
+function orderWitness(nodes: OrderNode[], edges: EdgeLike[], beforeId: string, afterId: string): OrderWitness | null {
+  const virtual: EdgeLike = { fromId: beforeId, toId: afterId };
+  const order = topoOrder(nodes, edges, [virtual]);
+  if (!order) return null;
+  const levels = topoLevels(
+    nodes.map((n) => n.id),
+    [...edges, virtual],
+  ) ?? {};
+  const levelCount = Object.values(levels).reduce((m, l) => Math.max(m, l + 1), 0);
+  return { order, levels, levelCount };
+}
+
+/**
+ * 顺序确定性查询：
+ * - 已存在 a ⇝ b 的约束链 → 'a-before-b'，附一条最短约束路径作为判定依据；
+ * - 已存在 b ⇝ a 的约束链 → 'b-before-a'，附一条最短约束路径；
+ * - 两个方向都不可达 → 'unconstrained'，分别注入虚拟边 a→b、b→a 各生成一个合法拓扑序
+ *   作为双向见证（无约束意味着注入任一方向都不会成环，故两个见证必然存在）。
+ */
+export function queryOrder(nodes: OrderNode[], edges: EdgeLike[], aId: string, bId: string): OrderQueryOutcome {
+  const ab = findPath(edges, aId, bId);
+  if (ab) return { verdict: 'a-before-b', path: ab };
+  const ba = findPath(edges, bId, aId);
+  if (ba) return { verdict: 'b-before-a', path: ba };
+  const aFirst = orderWitness(nodes, edges, aId, bId)!;
+  const bFirst = orderWitness(nodes, edges, bId, aId)!;
+  return { verdict: 'unconstrained', witnesses: { aFirst, bFirst } };
+}
+
+/**
  * 在已有图中寻找一个环（用于导入快照校验）。
  * 返回闭环节点序列 [n, …, n]；无环返回 null。
  */

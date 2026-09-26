@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { db, getEdges, getEvidence } from './db';
-import { cycleAfterAdding, findCycle, findRedundantEdges, planPrune, topoLevels } from './graph';
+import { cycleAfterAdding, findCycle, findRedundantEdges, planPrune, queryOrder, topoLevels } from './graph';
 import { resetWithSample, seedIfEmpty } from './seed';
-import type { Evidence, GraphState, PruneResult, RedundancyReport } from './types';
+import type { Evidence, GraphState, OrderQueryResult, PruneResult, RedundancyReport } from './types';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -145,6 +145,28 @@ app.post('/api/edges/prune', (req, res) => {
   });
   tx();
   const result: PruneResult = { ...buildState(), pruned: plan.remove.map((e) => e.id), skipped: plan.skipped };
+  res.json(result);
+});
+
+/* ---------- 顺序确定性查询 ---------- */
+
+app.get('/api/order-query', (req, res) => {
+  const a = typeof req.query.a === 'string' ? req.query.a : '';
+  const b = typeof req.query.b === 'string' ? req.query.b : '';
+  if (!a || !b) return res.status(400).json({ message: 'a 与 b 两个查询参数均为必填' });
+  if (a === b) return res.status(400).json({ message: '请选择两张不同的证据卡片' });
+  const evidence = getEvidence();
+  const ids = new Set(evidence.map((e) => e.id));
+  if (!ids.has(a) || !ids.has(b)) {
+    return res.status(404).json({ message: '证据卡片不存在，请刷新后重试' });
+  }
+  const outcome = queryOrder(
+    evidence.map((e) => ({ id: e.id, createdAt: e.createdAt })),
+    getEdges(),
+    a,
+    b,
+  );
+  const result: OrderQueryResult = { ...outcome, aId: a, bId: b };
   res.json(result);
 });
 

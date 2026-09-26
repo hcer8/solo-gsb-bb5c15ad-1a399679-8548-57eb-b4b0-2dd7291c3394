@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import type { Conflict } from '../App';
-import type { Evidence, GraphState, RedundantEdge } from '../types';
+import type { Evidence, GraphState, OrderWitness, RedundantEdge } from '../types';
 
 interface Rect {
   x: number;
@@ -15,6 +15,12 @@ interface BoardProps {
   linkFrom: string | null;
   /** 瘦身面板选中的冗余连线：高亮原连线与其替代路径 */
   pruneFocus: RedundantEdge | null;
+  /** 顺序查询的判定依据路径：在画布上高亮（青色） */
+  orderPath: string[] | null;
+  /** 见证预览：临时使用的层级与列内排序（仅前端展示，不对应数据库状态） */
+  preview: OrderWitness | null;
+  /** 预览时展示的虚拟约束连线（青色虚线） */
+  previewLink: { from: string; to: string } | null;
   onStartLink: (id: string) => void;
   onCancelLink: () => void;
   onConnect: (fromId: string, toId: string) => void;
@@ -64,16 +70,26 @@ export default function Board(props: BoardProps) {
   const byId = useMemo(() => new Map(state.evidence.map((e) => [e.id, e])), [state.evidence]);
 
   const columns = useMemo(() => {
-    const cols: Evidence[][] = Array.from({ length: Math.max(state.levelCount, 1) }, () => []);
+    // 预览模式下改用见证的层级与拓扑序；否则使用服务端状态
+    const levels = props.preview?.levels ?? state.levels;
+    const levelCount = props.preview?.levelCount ?? state.levelCount;
+    const cols: Evidence[][] = Array.from({ length: Math.max(levelCount, 1) }, () => []);
     for (const ev of state.evidence) {
-      const lv = state.levels[ev.id] ?? 0;
+      const lv = levels[ev.id] ?? 0;
       (cols[lv] ?? cols[0]).push(ev);
     }
-    for (const col of cols) {
-      col.sort((a, b) => (a.occurredAt ?? '').localeCompare(b.occurredAt ?? '') || a.title.localeCompare(b.title, 'zh'));
+    if (props.preview) {
+      const rank = new Map(props.preview.order.map((id, i) => [id, i]));
+      for (const col of cols) {
+        col.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0));
+      }
+    } else {
+      for (const col of cols) {
+        col.sort((a, b) => (a.occurredAt ?? '').localeCompare(b.occurredAt ?? '') || a.title.localeCompare(b.title, 'zh'));
+      }
     }
     return cols;
-  }, [state]);
+  }, [state, props.preview]);
 
   const conflictNodes = useMemo(() => new Set(conflict?.cycle ?? []), [conflict]);
   const conflictEdgeKeys = useMemo(() => {
@@ -99,6 +115,17 @@ export default function Board(props: BoardProps) {
   }, [props.pruneFocus]);
   const prunePathNodes = useMemo(() => new Set(props.pruneFocus?.path ?? []), [props.pruneFocus]);
   const pruneTargetKey = props.pruneFocus ? `${props.pruneFocus.fromId}->${props.pruneFocus.toId}` : null;
+
+  /* 顺序查询高亮：最短约束路径经过的边与节点（青色） */
+  const orderEdgeKeys = useMemo(() => {
+    const s = new Set<string>();
+    if (props.orderPath) {
+      const p = props.orderPath;
+      for (let i = 0; i < p.length - 1; i++) s.add(`${p[i]}->${p[i + 1]}`);
+    }
+    return s;
+  }, [props.orderPath]);
+  const orderPathNodes = useMemo(() => new Set(props.orderPath ?? []), [props.orderPath]);
 
   /* 测量卡片位置，用于绘制 SVG 连线 */
   useLayoutEffect(() => {
@@ -128,7 +155,7 @@ export default function Board(props: BoardProps) {
     ro.observe(board);
     board.querySelectorAll('[data-card-id]').forEach((el) => ro.observe(el));
     return () => ro.disconnect();
-  }, [state, conflict, linkFrom]);
+  }, [state, conflict, linkFrom, props.preview]);
 
   const toBoardPoint = (e: ReactPointerEvent) => {
     const board = boardRef.current!;
@@ -183,7 +210,7 @@ export default function Board(props: BoardProps) {
   }
 
   return (
-    <section className="board" ref={boardRef} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
+    <section className={`board${props.preview ? ' previewing' : ''}`} ref={boardRef} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
       <svg className="edge-layer" width={svgSize.w} height={svgSize.h} aria-hidden>
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -198,6 +225,9 @@ export default function Board(props: BoardProps) {
           <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 1 L 9 5 L 0 9 z" fill="#4ade80" />
           </marker>
+          <marker id="arrow-cyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#22d3ee" />
+          </marker>
         </defs>
 
         {state.edges.map((e) => {
@@ -208,15 +238,25 @@ export default function Board(props: BoardProps) {
           const isConflict = conflictEdgeKeys.has(key);
           const isPruneTarget = key === pruneTargetKey;
           const isPruneAlt = pruneAltEdgeKeys.has(key);
+          const isOrderPath = orderEdgeKeys.has(key);
           const cls = [
             'edge',
             isConflict ? 'conflict' : '',
             isPruneTarget ? 'prune-target' : '',
             isPruneAlt ? 'prune-alt' : '',
+            isOrderPath ? 'order-path' : '',
           ]
             .filter(Boolean)
             .join(' ');
-          const marker = isConflict ? 'arrow-red' : isPruneTarget ? 'arrow-amber' : isPruneAlt ? 'arrow-green' : 'arrow';
+          const marker = isConflict
+            ? 'arrow-red'
+            : isPruneTarget
+              ? 'arrow-amber'
+              : isPruneAlt
+                ? 'arrow-green'
+                : isOrderPath
+                  ? 'arrow-cyan'
+                  : 'arrow';
           const d = curve(s, t);
           return (
             <g key={e.id} className={cls} onClick={() => props.onDeleteEdge(e.id)}>
@@ -229,6 +269,14 @@ export default function Board(props: BoardProps) {
 
         {attempted && positions[attempted.from] && positions[attempted.to] && (
           <path className="edge-attempted" d={curve(positions[attempted.from], positions[attempted.to])} markerEnd="url(#arrow-red)" />
+        )}
+
+        {props.previewLink && positions[props.previewLink.from] && positions[props.previewLink.to] && (
+          <path
+            className="edge-preview"
+            d={curve(positions[props.previewLink.from], positions[props.previewLink.to])}
+            markerEnd="url(#arrow-cyan)"
+          />
         )}
 
         {drag && dragSource && (
@@ -246,7 +294,10 @@ export default function Board(props: BoardProps) {
         {columns.map((col, i) => (
           <div className="column" key={i}>
             <div className="column-header">
-              <span className="column-title">层级 {i + 1}</span>
+              <span className="column-title">
+                层级 {i + 1}
+                {props.preview && <span className="preview-badge">预览</span>}
+              </span>
               <span className="column-hint">{LEVEL_HINTS[i] ?? `需等待前 ${i} 层完成`}</span>
             </div>
             {col.map((ev) => {
@@ -256,6 +307,7 @@ export default function Board(props: BoardProps) {
               const isPruneEndpoint =
                 props.pruneFocus !== null && (props.pruneFocus.fromId === ev.id || props.pruneFocus.toId === ev.id);
               const isPrunePath = !isPruneEndpoint && prunePathNodes.has(ev.id);
+              const isOrderPath = orderPathNodes.has(ev.id);
               return (
                 <article
                   key={ev.id}
@@ -267,6 +319,7 @@ export default function Board(props: BoardProps) {
                     isTarget ? 'link-target' : '',
                     isPruneEndpoint ? 'prune-endpoint' : '',
                     isPrunePath ? 'prune-path' : '',
+                    isOrderPath ? 'order-path-node' : '',
                   ]
                     .filter(Boolean)
                     .join(' ')}

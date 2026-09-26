@@ -1,3 +1,5 @@
+import type { OrderQueryOutcome } from './graph';
+
 export interface Evidence {
   id: string;
   title: string;
@@ -43,3 +45,9 @@ export interface PruneResult extends GraphState {
   pruned: number[];
   skipped: number[];
 }
+
+/**
+ * 顺序确定性查询结果（GET /api/order-query）：
+ * 判定 + 最短约束路径（已约束时）或双向见证拓扑序（未约束时）。
+ */
+export type OrderQueryResult = OrderQueryOutcome & { aId: string; bId: string };

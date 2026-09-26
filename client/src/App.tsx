@@ -3,9 +3,10 @@ import { api, ApiError } from './api';
 import Board from './components/Board';
 import CardForm from './components/CardForm';
 import ConflictBanner from './components/ConflictBanner';
+import OrderQueryPanel, { type PreviewWhich } from './components/OrderQueryPanel';
 import PrunePanel from './components/PrunePanel';
 import TimelinePanel from './components/TimelinePanel';
-import type { Evidence, EvidenceFormValues, GraphState, RedundantEdge } from './types';
+import type { Evidence, EvidenceFormValues, GraphState, OrderQueryResult, OrderWitness, RedundantEdge } from './types';
 
 export interface Conflict {
   cycle: string[];
@@ -21,6 +22,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [redundant, setRedundant] = useState<RedundantEdge[]>([]);
   const [pruneFocus, setPruneFocus] = useState<RedundantEdge | null>(null);
+  const [orderResult, setOrderResult] = useState<OrderQueryResult | null>(null);
+  const [orderPathOn, setOrderPathOn] = useState(false);
+  const [preview, setPreview] = useState<{ which: PreviewWhich; witness: OrderWitness } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -30,10 +34,13 @@ export default function App() {
       .catch(() => setError('无法连接服务器，请确认后端已启动'));
   }, []);
 
-  /* 图状态每次变化后重新做传递约简分析，并取消可能已失效的瘦身高亮 */
+  /* 图状态每次变化后重新做传递约简分析，并取消可能已失效的瘦身高亮与顺序查询结果 */
   useEffect(() => {
     if (!state) return;
     setPruneFocus(null);
+    setOrderResult(null);
+    setOrderPathOn(false);
+    setPreview(null);
     let alive = true;
     api
       .redundancy()
@@ -51,6 +58,7 @@ export default function App() {
       if (e.key === 'Escape') {
         setLinkFrom(null);
         setEditing(null);
+        setPreview(null);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -153,6 +161,35 @@ export default function App() {
     void run(() => api.pruneEdges(redundant.map((r) => r.edgeId)));
   }, [redundant, run]);
 
+  /* 顺序确定性查询：只读接口，不改变图状态 */
+  const queryOrder = useCallback(
+    async (aId: string, bId: string) => {
+      setBusy(true);
+      try {
+        const r = await api.orderQuery(aId, bId);
+        setOrderResult(r);
+        setOrderPathOn(r.verdict !== 'unconstrained');
+        setPreview(null);
+        setError(null);
+      } catch (e) {
+        handleApiError(e);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [handleApiError],
+  );
+
+  /* 按某个见证临时预览画布布局（纯前端状态，不写数据库）；再次点击同一见证退出预览 */
+  const togglePreview = useCallback(
+    (which: PreviewWhich) => {
+      if (!orderResult || orderResult.verdict !== 'unconstrained') return;
+      const witness = orderResult.witnesses[which];
+      setPreview((cur) => (cur?.which === which ? null : { which, witness }));
+    },
+    [orderResult],
+  );
+
   const titleOf = useCallback(
     (id: string) => state?.evidence.find((e) => e.id === id)?.title ?? id.slice(0, 8),
     [state],
@@ -217,6 +254,40 @@ export default function App() {
         />
       )}
 
+      {state && (
+        <OrderQueryPanel
+          evidence={state.evidence}
+          result={orderResult}
+          busy={busy}
+          pathOn={orderPathOn}
+          previewing={preview?.which ?? null}
+          titleOf={titleOf}
+          onQuery={queryOrder}
+          onTogglePath={() => setOrderPathOn((v) => !v)}
+          onPreview={togglePreview}
+          onClose={() => {
+            setOrderResult(null);
+            setOrderPathOn(false);
+            setPreview(null);
+          }}
+        />
+      )}
+
+      {preview && orderResult && orderResult.verdict === 'unconstrained' && (
+        <div className="preview-hint">
+          <span>
+            预览模式：画布正按见证「
+            {preview.which === 'aFirst'
+              ? `${titleOf(orderResult.aId)} 在 ${titleOf(orderResult.bId)} 前`
+              : `${titleOf(orderResult.bId)} 在 ${titleOf(orderResult.aId)} 前`}
+            」的拓扑序临时重排，仅前端展示，不会写入数据库（Esc 退出）。
+          </span>
+          <button className="btn small" onClick={() => setPreview(null)}>
+            退出预览
+          </button>
+        </div>
+      )}
+
       {linkFrom && state && (
         <div className="link-hint">
           连线模式：点击另一张卡片，使「{titleOf(linkFrom)}」<b>必须早于</b>它（Esc 取消）
@@ -231,6 +302,15 @@ export default function App() {
               conflict={conflict}
               linkFrom={linkFrom}
               pruneFocus={pruneFocus}
+              orderPath={orderPathOn && orderResult && orderResult.verdict !== 'unconstrained' ? orderResult.path : null}
+              preview={preview?.witness ?? null}
+              previewLink={
+                preview && orderResult && orderResult.verdict === 'unconstrained'
+                  ? preview.which === 'aFirst'
+                    ? { from: orderResult.aId, to: orderResult.bId }
+                    : { from: orderResult.bId, to: orderResult.aId }
+                  : null
+              }
               onStartLink={setLinkFrom}
               onCancelLink={() => setLinkFrom(null)}
               onConnect={connect}
