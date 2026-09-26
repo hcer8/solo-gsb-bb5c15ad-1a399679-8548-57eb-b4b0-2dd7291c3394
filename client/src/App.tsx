@@ -3,9 +3,10 @@ import { api, ApiError } from './api';
 import Board from './components/Board';
 import CardForm from './components/CardForm';
 import ConflictBanner from './components/ConflictBanner';
+import OrderQueryPanel from './components/OrderQueryPanel';
 import PrunePanel from './components/PrunePanel';
 import TimelinePanel from './components/TimelinePanel';
-import type { Evidence, EvidenceFormValues, GraphState, RedundantEdge } from './types';
+import type { Evidence, EvidenceFormValues, GraphState, OrderWitness, RedundantEdge } from './types';
 
 export interface Conflict {
   cycle: string[];
@@ -21,6 +22,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [redundant, setRedundant] = useState<RedundantEdge[]>([]);
   const [pruneFocus, setPruneFocus] = useState<RedundantEdge | null>(null);
+  /** 顺序查询：画布上高亮的依据路径 / 正在预览的见证布局 */
+  const [orderPath, setOrderPath] = useState<string[] | null>(null);
+  const [orderPreview, setOrderPreview] = useState<OrderWitness | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -30,10 +34,12 @@ export default function App() {
       .catch(() => setError('无法连接服务器，请确认后端已启动'));
   }, []);
 
-  /* 图状态每次变化后重新做传递约简分析，并取消可能已失效的瘦身高亮 */
+  /* 图状态每次变化后重新做传递约简分析，并取消可能已失效的瘦身高亮与顺序查询高亮/预览 */
   useEffect(() => {
     if (!state) return;
     setPruneFocus(null);
+    setOrderPath(null);
+    setOrderPreview(null);
     let alive = true;
     api
       .redundancy()
@@ -51,6 +57,8 @@ export default function App() {
       if (e.key === 'Escape') {
         setLinkFrom(null);
         setEditing(null);
+        setOrderPath(null);
+        setOrderPreview(null);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -217,6 +225,29 @@ export default function App() {
         />
       )}
 
+      {state && (
+        <OrderQueryPanel
+          state={state}
+          highlightPath={orderPath}
+          preview={orderPreview}
+          titleOf={titleOf}
+          onHighlightPath={setOrderPath}
+          onPreview={setOrderPreview}
+        />
+      )}
+
+      {orderPreview && (
+        <div className="preview-banner">
+          <span>
+            正在预览见证布局：假设「{titleOf(orderPreview.firstId)}」<b>必须早于</b>「{titleOf(orderPreview.secondId)}」
+            （青色虚线为临时见证约束，仅前端预览，不会写入数据库，Esc 退出）
+          </span>
+          <button className="btn small" onClick={() => setOrderPreview(null)}>
+            退出预览
+          </button>
+        </div>
+      )}
+
       {linkFrom && state && (
         <div className="link-hint">
           连线模式：点击另一张卡片，使「{titleOf(linkFrom)}」<b>必须早于</b>它（Esc 取消）
@@ -231,6 +262,8 @@ export default function App() {
               conflict={conflict}
               linkFrom={linkFrom}
               pruneFocus={pruneFocus}
+              orderPath={orderPath}
+              preview={orderPreview}
               onStartLink={setLinkFrom}
               onCancelLink={() => setLinkFrom(null)}
               onConnect={connect}

@@ -142,6 +142,89 @@ export function topoLevels(ids: string[], edges: EdgeLike[]): Record<string, num
 }
 
 /**
+ * 确定性拓扑排序（Kahn）：就绪集中的并列节点统一按创建时间、再按 id 稳定排序，
+ * 保证同一输入永远得到同一结果。可附加一条额外约束边（用于生成见证拓扑序）；
+ * 图（含附加边）有环时返回 null。
+ */
+export interface OrderableNode {
+  id: string;
+  createdAt: string;
+}
+
+export function stableTopoOrder(nodes: OrderableNode[], edges: EdgeLike[], extraEdge: EdgeLike | null = null): string[] | null {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const cmp = (x: string, y: string): number => {
+    const a = byId.get(x)!;
+    const b = byId.get(y)!;
+    if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
+    if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+    return 0;
+  };
+  const indeg = new Map<string, number>();
+  const adj = new Map<string, string[]>();
+  for (const n of nodes) {
+    indeg.set(n.id, 0);
+    adj.set(n.id, []);
+  }
+  const all = extraEdge ? [...edges, extraEdge] : edges;
+  for (const e of all) {
+    if (!indeg.has(e.fromId) || !indeg.has(e.toId)) continue;
+    indeg.set(e.toId, indeg.get(e.toId)! + 1);
+    adj.get(e.fromId)!.push(e.toId);
+  }
+  // 就绪集始终按 (createdAt, id) 升序，保证结果确定
+  const ready = nodes
+    .filter((n) => indeg.get(n.id) === 0)
+    .map((n) => n.id)
+    .sort(cmp);
+  const order: string[] = [];
+  while (ready.length > 0) {
+    const cur = ready.shift()!;
+    order.push(cur);
+    for (const nxt of adj.get(cur)!) {
+      const d = indeg.get(nxt)! - 1;
+      indeg.set(nxt, d);
+      if (d === 0) {
+        let pos = ready.length;
+        while (pos > 0 && cmp(ready[pos - 1], nxt) > 0) pos--;
+        ready.splice(pos, 0, nxt);
+      }
+    }
+  }
+  return order.length === nodes.length ? order : null;
+}
+
+/**
+ * 顺序确定性查询：判定两张卡片的先后顺序是否已被约束确定。
+ * - A 可达 B：A 必须早于 B，返回 A → B 的一条最短约束路径；
+ * - B 可达 A：B 必须早于 A，返回 B → A 的一条最短约束路径；
+ * - 互相不可达：顺序未被约束，分别附加见证方向边（A→B 与 B→A），
+ *   生成两个合法拓扑序作为双向见证。
+ * aId === bId 或图（含见证边）有环时返回 null。
+ */
+export type OrderRelation = 'a-before-b' | 'b-before-a' | 'unconstrained';
+
+export interface OrderQueryOutcome {
+  relation: OrderRelation;
+  /** relation 为 a-before-b / b-before-a 时：从先到后的一条最短约束路径（含两端点） */
+  path: string[] | null;
+  /** relation 为 unconstrained 时：双向见证拓扑序（aFirst 中 a 在 b 前，bFirst 反之） */
+  witnesses: { aFirst: string[]; bFirst: string[] } | null;
+}
+
+export function queryOrder(nodes: OrderableNode[], edges: EdgeLike[], aId: string, bId: string): OrderQueryOutcome | null {
+  if (aId === bId) return null;
+  const pathAB = findPath(edges, aId, bId);
+  if (pathAB) return { relation: 'a-before-b', path: pathAB, witnesses: null };
+  const pathBA = findPath(edges, bId, aId);
+  if (pathBA) return { relation: 'b-before-a', path: pathBA, witnesses: null };
+  const aFirst = stableTopoOrder(nodes, edges, { fromId: aId, toId: bId });
+  const bFirst = stableTopoOrder(nodes, edges, { fromId: bId, toId: aId });
+  if (!aFirst || !bFirst) return null;
+  return { relation: 'unconstrained', path: null, witnesses: { aFirst, bFirst } };
+}
+
+/**
  * 在已有图中寻找一个环（用于导入快照校验）。
  * 返回闭环节点序列 [n, …, n]；无环返回 null。
  */

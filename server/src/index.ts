@@ -3,9 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { db, getEdges, getEvidence } from './db';
-import { cycleAfterAdding, findCycle, findRedundantEdges, planPrune, topoLevels } from './graph';
+import { cycleAfterAdding, findCycle, findRedundantEdges, planPrune, queryOrder, topoLevels } from './graph';
 import { resetWithSample, seedIfEmpty } from './seed';
-import type { Evidence, GraphState, PruneResult, RedundancyReport } from './types';
+import type { Evidence, GraphState, OrderQueryResult, OrderWitness, PruneResult, RedundancyReport } from './types';
 
 const app = express();
 app.use(express.json({ limit: '5mb' }));
@@ -145,6 +145,54 @@ app.post('/api/edges/prune', (req, res) => {
   });
   tx();
   const result: PruneResult = { ...buildState(), pruned: plan.remove.map((e) => e.id), skipped: plan.skipped };
+  res.json(result);
+});
+
+/* ---------- 顺序确定性查询 ---------- */
+
+app.get('/api/order-query', (req, res) => {
+  const { a, b } = req.query;
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) {
+    return res.status(400).json({ message: 'a 与 b 两个证据 id 均为必填' });
+  }
+  if (a === b) {
+    return res.status(400).json({ message: '请选择两张不同的证据卡片' });
+  }
+  const evidence = getEvidence();
+  const ids = new Set(evidence.map((e) => e.id));
+  if (!ids.has(a) || !ids.has(b)) {
+    return res.status(404).json({ message: '证据卡片不存在，请刷新后重试' });
+  }
+  const edges = getEdges();
+  const outcome = queryOrder(
+    evidence.map((e) => ({ id: e.id, createdAt: e.createdAt })),
+    edges,
+    a,
+    b,
+  );
+  if (!outcome) {
+    return res.status(409).json({ message: '当前约束图存在环，无法判定顺序' });
+  }
+  // 未约束时：为每个见证方向计算附加约束后的拓扑层级，供前端临时预览画布布局
+  let witnesses: OrderQueryResult['witnesses'] = null;
+  if (outcome.witnesses) {
+    const allIds = evidence.map((e) => e.id);
+    const buildWitness = (firstId: string, secondId: string, order: string[]): OrderWitness => {
+      const levels = topoLevels(allIds, [...edges, { fromId: firstId, toId: secondId }]) ?? {};
+      return {
+        firstId,
+        secondId,
+        order,
+        levels,
+        levelCount: Object.values(levels).reduce((m, l) => Math.max(m, l + 1), 0),
+      };
+    };
+    witnesses = {
+      aFirst: buildWitness(a, b, outcome.witnesses.aFirst),
+      bFirst: buildWitness(b, a, outcome.witnesses.bFirst),
+    };
+  }
+  const result: OrderQueryResult = { aId: a, bId: b, relation: outcome.relation, path: outcome.path, witnesses };
   res.json(result);
 });
 

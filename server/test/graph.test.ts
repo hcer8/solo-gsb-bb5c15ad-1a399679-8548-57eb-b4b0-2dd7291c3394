@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { cycleAfterAdding, findCycle, findPath, findRedundantEdges, planPrune, topoLevels } from '../src/graph';
+import {
+  cycleAfterAdding,
+  findCycle,
+  findPath,
+  findRedundantEdges,
+  planPrune,
+  queryOrder,
+  stableTopoOrder,
+  topoLevels,
+} from '../src/graph';
 
 test('合法连线：不成环时返回 null', () => {
   const edges = [{ fromId: 'a', toId: 'b' }];
@@ -188,4 +197,83 @@ test('planPrune：移除后各节点间可达关系保持不变', () => {
       assert.equal(findPath(remaining, from, to) !== null, reachableBefore(from, to), `${from}⇝${to} 可达性应保持不变`);
     }
   }
+});
+
+/* ---------- 顺序确定性查询 ---------- */
+
+const nodesOf = (ids: string[]) => ids.map((id, i) => ({ id, createdAt: `2026-01-0${i + 1}T00:00:00.000Z` }));
+
+test('stableTopoOrder：并列节点按创建时间、再按 id 稳定排序', () => {
+  const nodes = [
+    { id: 'b', createdAt: '2026-01-02T00:00:00.000Z' },
+    { id: 'a', createdAt: '2026-01-01T00:00:00.000Z' },
+    { id: 'c', createdAt: '2026-01-01T00:00:00.000Z' },
+  ];
+  // 无边：完全按 (createdAt, id) 排序；a 与 c 创建时间相同，按 id 决出
+  assert.deepEqual(stableTopoOrder(nodes, []), ['a', 'c', 'b']);
+});
+
+test('stableTopoOrder：遵守约束且结果确定', () => {
+  const nodes = nodesOf(['x', 'y', 'z']);
+  const edges = [{ fromId: 'z', toId: 'x' }];
+  // z 必须先于 x；y 无约束，按创建时间排最前
+  assert.deepEqual(stableTopoOrder(nodes, edges), ['y', 'z', 'x']);
+});
+
+test('stableTopoOrder：附加见证边后仍满足全部约束；附加边成环时返回 null', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const order = stableTopoOrder(nodes, [], { fromId: 'b', toId: 'a' })!;
+  assert.ok(order.indexOf('b') < order.indexOf('a'));
+  // 已有 a→b 时再附加 b→a 构成环
+  assert.equal(stableTopoOrder(nodes, [{ fromId: 'a', toId: 'b' }], { fromId: 'b', toId: 'a' }), null);
+});
+
+test('queryOrder：A 必须早于 B，返回最短约束路径', () => {
+  const nodes = nodesOf(['a', 'b', 'c']);
+  const edges = [
+    { fromId: 'a', toId: 'b' },
+    { fromId: 'b', toId: 'c' },
+    { fromId: 'a', toId: 'c' },
+  ];
+  const r = queryOrder(nodes, edges, 'a', 'c')!;
+  assert.equal(r.relation, 'a-before-b');
+  assert.deepEqual(r.path, ['a', 'c']); // 最短路径为直达边
+  assert.equal(r.witnesses, null);
+});
+
+test('queryOrder：B 必须早于 A（反向可达）', () => {
+  const nodes = nodesOf(['a', 'b']);
+  const edges = [{ fromId: 'b', toId: 'a' }];
+  const r = queryOrder(nodes, edges, 'a', 'b')!;
+  assert.equal(r.relation, 'b-before-a');
+  assert.deepEqual(r.path, ['b', 'a']);
+  assert.equal(r.witnesses, null);
+});
+
+test('queryOrder：顺序未被约束时给出双向见证拓扑序', () => {
+  const nodes = nodesOf(['a', 'b', 'c', 'd']);
+  const edges = [
+    { fromId: 'a', toId: 'c' },
+    { fromId: 'b', toId: 'd' },
+  ];
+  const r = queryOrder(nodes, edges, 'a', 'b')!;
+  assert.equal(r.relation, 'unconstrained');
+  assert.equal(r.path, null);
+  const { aFirst, bFirst } = r.witnesses!;
+  const assertTopoOrder = (order: string[], extra: { fromId: string; toId: string }) => {
+    assert.deepEqual([...order].sort(), ['a', 'b', 'c', 'd']);
+    const pos = new Map(order.map((id, i) => [id, i]));
+    for (const e of [...edges, extra]) {
+      assert.ok(pos.get(e.fromId)! < pos.get(e.toId)!, `${e.fromId} 应排在 ${e.toId} 之前`);
+    }
+  };
+  assertTopoOrder(aFirst, { fromId: 'a', toId: 'b' });
+  assertTopoOrder(bFirst, { fromId: 'b', toId: 'a' });
+  // 并列节点按创建时间稳定排序：a 创建最早且初始就绪，排在首位
+  assert.equal(aFirst[0], 'a');
+  assert.equal(bFirst[0], 'b');
+});
+
+test('queryOrder：同一卡片返回 null', () => {
+  assert.equal(queryOrder(nodesOf(['a']), [], 'a', 'a'), null);
 });
